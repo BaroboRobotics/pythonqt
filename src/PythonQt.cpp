@@ -886,6 +886,15 @@ void PythonQt::evalFile(PyObject* module, const QString& filename)
   }
 }
 
+static int setInterrupt (void*) {
+  PyErr_SetInterrupt();
+  return -1;
+}
+
+void PythonQt::setInterrupt() {
+  Py_AddPendingCall(&::setInterrupt, nullptr);
+}
+
 PythonQtObjectPtr PythonQt::parseFile(const QString& filename)
 {
   PythonQtObjectPtr p;
