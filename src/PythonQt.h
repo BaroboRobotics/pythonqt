@@ -347,7 +347,8 @@ public:
   //! evaluates the given script code from file
   void evalFile(PyObject* object, const QString& filename);
 
-  //! schedules an interrupt in the interpreter
+  //! schedules an interrupt in the interpreter, lets the interpreter execute
+  //! a few more steps, then schedules interrupts as often as possible until death
   void setInterrupt();
 
   //@}

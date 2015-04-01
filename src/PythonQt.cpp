@@ -56,7 +56,11 @@
 
 #include <QDir>
 
+#include "frameobject.h"
+#include "opcode.h"
+
 #include <pydebug.h>
+#include <map>
 #include <vector>
 
 PythonQt* PythonQt::_self = NULL;
@@ -886,13 +890,172 @@ void PythonQt::evalFile(PyObject* module, const QString& filename)
   }
 }
 
+static int traceCounter;
+static int setInterrupt (void*);
+
+static void showTrace (std::ostream& os, PyFrameObject* frame, int what, PyObject*) {
+  static auto traceEvents = std::map<int, std::string>{
+    { PyTrace_CALL, "CALL" },
+    { PyTrace_EXCEPTION, "EXCEPTION" },
+    { PyTrace_LINE, "LINE" },
+    { PyTrace_RETURN, "RETURN" },
+    { PyTrace_C_CALL, "C_CALL" },
+    { PyTrace_C_EXCEPTION, "C_EXCEPTION" },
+    { PyTrace_C_RETURN, "C_RETURN" }
+  };
+
+  static auto opcodes = std::map<int, std::string>{
+#define ITEM(x) { x, #x },
+    ITEM(POP_TOP)
+    ITEM(ROT_TWO)
+    ITEM(ROT_THREE)
+    ITEM(DUP_TOP)
+    ITEM(DUP_TOP_TWO)
+    ITEM(NOP)
+    ITEM(UNARY_POSITIVE)
+    ITEM(UNARY_NEGATIVE)
+    ITEM(UNARY_NOT)
+    ITEM(UNARY_INVERT)
+    ITEM(BINARY_POWER)
+    ITEM(BINARY_MULTIPLY)
+    ITEM(BINARY_MODULO)
+    ITEM(BINARY_ADD)
+    ITEM(BINARY_SUBTRACT)
+    ITEM(BINARY_SUBSCR)
+    ITEM(BINARY_FLOOR_DIVIDE)
+    ITEM(BINARY_TRUE_DIVIDE)
+    ITEM(INPLACE_FLOOR_DIVIDE)
+    ITEM(INPLACE_TRUE_DIVIDE)
+    ITEM(STORE_MAP)
+    ITEM(INPLACE_ADD)
+    ITEM(INPLACE_SUBTRACT)
+    ITEM(INPLACE_MULTIPLY)
+    ITEM(INPLACE_MODULO)
+    ITEM(STORE_SUBSCR)
+    ITEM(DELETE_SUBSCR)
+    ITEM(BINARY_LSHIFT)
+    ITEM(BINARY_RSHIFT)
+    ITEM(BINARY_AND)
+    ITEM(BINARY_XOR)
+    ITEM(BINARY_OR)
+    ITEM(INPLACE_POWER)
+    ITEM(GET_ITER)
+    ITEM(PRINT_EXPR)
+    ITEM(LOAD_BUILD_CLASS)
+    ITEM(YIELD_FROM)
+    ITEM(INPLACE_LSHIFT)
+    ITEM(INPLACE_RSHIFT)
+    ITEM(INPLACE_AND)
+    ITEM(INPLACE_XOR)
+    ITEM(INPLACE_OR)
+    ITEM(BREAK_LOOP)
+    ITEM(WITH_CLEANUP)
+    ITEM(RETURN_VALUE)
+    ITEM(IMPORT_STAR)
+    ITEM(YIELD_VALUE)
+    ITEM(POP_BLOCK)
+    ITEM(END_FINALLY)
+    ITEM(POP_EXCEPT)
+    ITEM(HAVE_ARGUMENT)
+    ITEM(STORE_NAME)
+    ITEM(DELETE_NAME)
+    ITEM(UNPACK_SEQUENCE)
+    ITEM(FOR_ITER)
+    ITEM(UNPACK_EX)
+    ITEM(STORE_ATTR)
+    ITEM(DELETE_ATTR)
+    ITEM(STORE_GLOBAL)
+    ITEM(DELETE_GLOBAL)
+    ITEM(LOAD_CONST)
+    ITEM(LOAD_NAME)
+    ITEM(BUILD_TUPLE)
+    ITEM(BUILD_LIST)
+    ITEM(BUILD_SET)
+    ITEM(BUILD_MAP)
+    ITEM(LOAD_ATTR)
+    ITEM(COMPARE_OP)
+    ITEM(IMPORT_NAME)
+    ITEM(IMPORT_FROM)
+    ITEM(JUMP_FORWARD)
+    ITEM(JUMP_IF_FALSE_OR_POP)
+    ITEM(JUMP_IF_TRUE_OR_POP)
+    ITEM(JUMP_ABSOLUTE)
+    ITEM(POP_JUMP_IF_FALSE)
+    ITEM(POP_JUMP_IF_TRUE)
+    ITEM(LOAD_GLOBAL)
+    ITEM(CONTINUE_LOOP)
+    ITEM(SETUP_LOOP)
+    ITEM(SETUP_EXCEPT)
+    ITEM(SETUP_FINALLY)
+    ITEM(LOAD_FAST)
+    ITEM(STORE_FAST)
+    ITEM(DELETE_FAST)
+    ITEM(RAISE_VARARGS)
+    ITEM(CALL_FUNCTION)
+    ITEM(MAKE_FUNCTION)
+    ITEM(BUILD_SLICE)
+    ITEM(MAKE_CLOSURE)
+    ITEM(LOAD_CLOSURE)
+    ITEM(LOAD_DEREF)
+    ITEM(STORE_DEREF)
+    ITEM(DELETE_DEREF)
+    ITEM(CALL_FUNCTION_VAR)
+    ITEM(CALL_FUNCTION_KW)
+    ITEM(CALL_FUNCTION_VAR_KW)
+    ITEM(SETUP_WITH)
+    ITEM(EXTENDED_ARG)
+    ITEM(LIST_APPEND)
+    ITEM(SET_ADD)
+    ITEM(MAP_ADD)
+    ITEM(LOAD_CLASSDEREF)
+    ITEM(EXCEPT_HANDLER)
+#undef ITEM
+  };
+
+  auto traceIter = traceEvents.find(what);
+  auto trace = traceIter != traceEvents.end() ? traceIter->second : "unknown trace event";
+
+  auto ocIter = opcodes.find(frame->f_blockstack[frame->f_iblock].b_type);
+  auto oc = ocIter != opcodes.end() ? ocIter->second : "unknown opcode";
+
+  os << "** Trace: " << trace << " " << oc << " "
+     << " line " << frame->f_lineno << " block " << frame->f_iblock << " "
+     << (PyErr_Occurred() ? "ERROR" : "") << std::endl;
+}
+
+static int traceFunc (PyObject*, PyFrameObject* frame, int what, PyObject* arg) {
+  showTrace(std::cout, frame, what, arg);
+
+  if (!traceCounter) {
+    // Using this conditional will cause the interpreter to break out of nested
+    // try/except blocks as quickly as possible without crashing the process.
+    if (PyTrace_LINE == what && !PyErr_Occurred()) {
+      // Start getting more insistent
+      // FIXME need some way of unregistering the the trace function once
+      // evalScript returns.
+      PyErr_SetInterrupt();
+      return -1;
+    }
+  }
+  else {
+    --traceCounter;
+  }
+  return 0;
+}
+
 static int setInterrupt (void*) {
+  // Give the interpreter ten trace steps before we assume we're trapped in a
+  // try/except block. This is an arbitrary number.
+  traceCounter = 10;
   PyErr_SetInterrupt();
+  PyEval_SetTrace(&::traceFunc, nullptr);
   return -1;
 }
 
 void PythonQt::setInterrupt() {
-  Py_AddPendingCall(&::setInterrupt, nullptr);
+  auto rc = Py_AddPendingCall(&::setInterrupt, nullptr);
+  assert(!rc); // are we screwed?
+  (void)rc;
 }
 
 PythonQtObjectPtr PythonQt::parseFile(const QString& filename)
