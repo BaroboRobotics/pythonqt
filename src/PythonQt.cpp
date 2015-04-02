@@ -890,9 +890,6 @@ void PythonQt::evalFile(PyObject* module, const QString& filename)
   }
 }
 
-static int traceCounter;
-static int setInterrupt (void*);
-
 static void showTrace (std::ostream& os, PyFrameObject* frame, int what, PyObject*) {
   static auto traceEvents = std::map<int, std::string>{
     { PyTrace_CALL, "CALL" },
@@ -1023,37 +1020,37 @@ static void showTrace (std::ostream& os, PyFrameObject* frame, int what, PyObjec
      << (PyErr_Occurred() ? "ERROR" : "") << std::endl;
 }
 
-static int traceFunc (PyObject*, PyFrameObject* frame, int what, PyObject* arg) {
+static int killTraceFunc (PyObject*, PyFrameObject* frame, int what, PyObject* arg) {
   showTrace(std::cout, frame, what, arg);
 
-  if (!traceCounter) {
-    // Using this conditional will cause the interpreter to break out of nested
-    // try/except blocks as quickly as possible without crashing the process.
-    if (PyTrace_LINE == what && !PyErr_Occurred()) {
-      // Start getting more insistent
-      // FIXME need some way of unregistering the the trace function once
-      // evalScript returns.
-      PyErr_SetInterrupt();
-      return -1;
-    }
-  }
-  else {
-    --traceCounter;
+  if (PyTrace_LINE == what && !PyErr_Occurred()) {
+    // FIXME need some way of unregistering the the trace function once
+    // evalScript returns.
+    PyErr_SetInterrupt();
+    return 0;
   }
   return 0;
 }
 
-static int setInterrupt (void*) {
-  // Give the interpreter ten trace steps before we assume we're trapped in a
-  // try/except block. This is an arbitrary number.
-  traceCounter = 10;
+static int killImpl (void*) {
   PyErr_SetInterrupt();
-  PyEval_SetTrace(&::traceFunc, nullptr);
+  PyEval_SetTrace(&::killTraceFunc, nullptr);
+  return 0; // -1 won't always work if script kiddy called sys.settrace()
+}
+
+void PythonQt::kill() {
+  auto rc = Py_AddPendingCall(&::killImpl, nullptr);
+  assert(!rc); // are we screwed?
+  (void)rc;
+}
+
+static int interruptImpl (void*) {
+  PyErr_SetInterrupt();
   return -1;
 }
 
-void PythonQt::setInterrupt() {
-  auto rc = Py_AddPendingCall(&::setInterrupt, nullptr);
+void PythonQt::interrupt() {
+  auto rc = Py_AddPendingCall(&::interruptImpl, nullptr);
   assert(!rc); // are we screwed?
   (void)rc;
 }
